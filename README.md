@@ -25,7 +25,16 @@ python pdf2md.py --list-models                      # ver qué modelos tienes
 python pdf2md.py informe.pdf                        # usa el primer modelo detectado
 python pdf2md.py *.pdf -m ollama:qwen2.5:7b -o md/  # varios PDFs, modelo concreto
 python pdf2md.py informe.pdf --no-ai                # sólo extracción, sin IA
+python pdf2md.py escaneado.pdf -v ollama:qwen2.5vl:7b  # leer páginas escaneadas
 ```
+
+## PDFs escaneados
+
+Si una página no tiene texto (es una foto o un escaneo), se renderiza como imagen y se
+envía a un **modelo de visión** indicado con `-v / --vision-model`, que la transcribe a
+Markdown. Modelos de visión locales recomendados: `qwen2.5vl:7b`, `llama3.2-vision`,
+`gemma3` (Ollama), o cualquier modelo con visión cargado en LM Studio.
+Sin `-v`, el programa avisa de cuántas páginas se quedarían vacías.
 
 Opciones útiles: `--chunk-chars` (tamaño de bloque; bájalo si tu modelo tiene poco contexto)
 y `--timeout` (segundos por bloque).

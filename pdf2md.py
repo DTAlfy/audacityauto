@@ -15,6 +15,7 @@ Uso:
   python pdf2md.py documento.pdf
   python pdf2md.py *.pdf --model ollama:qwen2.5:7b -o salida/
   python pdf2md.py documento.pdf --no-ai
+  python pdf2md.py escaneado.pdf -v ollama:qwen2.5vl:7b   # PDFs escaneados
 """
 
 import argparse
@@ -41,6 +42,13 @@ Devuelve ÚNICAMENTE el Markdown limpio:
 - Conserva listas, tablas (en formato Markdown), enlaces y bloques de código.
 - NO resumas, NO traduzcas, NO añadas contenido ni comentarios propios.
 - No envuelvas la respuesta en ```markdown."""
+
+VISION_PROMPT = """Transcribe esta página escaneada a Markdown. Copia el texto \
+tal cual (sin resumir ni traducir), respetando títulos, listas y tablas. \
+Omite cabeceras/pies de página y números de página. Devuelve sólo el Markdown."""
+
+# Una página con menos texto que esto se considera escaneada (imagen).
+SCANNED_MIN_CHARS = 50
 
 
 # ---------------------------------------------------------------- HTTP helpers
@@ -102,12 +110,11 @@ def pick_model(spec, available):
 
 # ------------------------------------------------------------------ LLM calls
 
-def clean_with_llm(text, backend, base_url, model, timeout):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": text},
-    ]
+def chat(messages, backend, base_url, model, timeout, images=()):
+    """Envía un chat al modelo. images: lista de PNG en base64 (para modelos de visión)."""
     if backend == "ollama":
+        if images:
+            messages[-1]["images"] = list(images)
         resp = _http(
             f"{base_url}/api/chat",
             {"model": model, "messages": messages, "stream": False,
@@ -116,6 +123,11 @@ def clean_with_llm(text, backend, base_url, model, timeout):
         )
         out = resp["message"]["content"]
     else:
+        if images:
+            messages[-1]["content"] = [{"type": "text", "text": messages[-1]["content"]}] + [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}}
+                for img in images
+            ]
         resp = _http(
             f"{base_url}/v1/chat/completions",
             {"model": model, "messages": messages, "temperature": 0.1},
@@ -123,6 +135,19 @@ def clean_with_llm(text, backend, base_url, model, timeout):
         )
         out = resp["choices"][0]["message"]["content"]
     return strip_fences(out)
+
+
+def clean_with_llm(text, model_info, timeout):
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": text},
+    ]
+    return chat(messages, *model_info, timeout=timeout)
+
+
+def transcribe_page_image(png_b64, model_info, timeout):
+    messages = [{"role": "user", "content": VISION_PROMPT}]
+    return chat(messages, *model_info, timeout=timeout, images=[png_b64])
 
 
 def strip_fences(text):
@@ -146,6 +171,31 @@ def extract_pages(pdf_path):
     return [p["text"] for p in pages]
 
 
+def render_page_png(pdf_path, page_index, dpi=150):
+    import base64
+    import pymupdf
+
+    with pymupdf.open(str(pdf_path)) as doc:
+        pix = doc[page_index].get_pixmap(dpi=dpi)
+        return base64.b64encode(pix.tobytes("png")).decode()
+
+
+def ocr_scanned_pages(pdf_path, pages, vision_info, timeout):
+    """Sustituye las páginas sin texto por la transcripción del modelo de visión."""
+    scanned = [i for i, t in enumerate(pages) if len(t.strip()) < SCANNED_MIN_CHARS]
+    if not scanned:
+        return pages
+    if vision_info is None:
+        print(f"  aviso: {len(scanned)} página(s) parecen escaneadas y saldrán vacías; "
+              "usa --vision-model para leerlas")
+        return pages
+    pages = list(pages)
+    for n, i in enumerate(scanned, 1):
+        print(f"  OCR página {i + 1} ({n}/{len(scanned)})...", flush=True)
+        pages[i] = transcribe_page_image(render_page_png(pdf_path, i), vision_info, timeout)
+    return pages
+
+
 def chunk_pages(pages, max_chars):
     """Agrupa páginas en bloques de como máximo max_chars caracteres."""
     chunks, current = [], ""
@@ -161,8 +211,8 @@ def chunk_pages(pages, max_chars):
 
 # ----------------------------------------------------------------------- main
 
-def convert(pdf_path, out_dir, model_info, args):
-    pages = extract_pages(pdf_path)
+def convert(pdf_path, out_dir, model_info, vision_info, args):
+    pages = ocr_scanned_pages(pdf_path, extract_pages(pdf_path), vision_info, args.timeout)
     if model_info is None:
         result = "\n\n".join(pages)
     else:
@@ -170,7 +220,7 @@ def convert(pdf_path, out_dir, model_info, args):
         cleaned = []
         for i, chunk in enumerate(chunks, 1):
             print(f"  bloque {i}/{len(chunks)}...", flush=True)
-            cleaned.append(clean_with_llm(chunk, *model_info, timeout=args.timeout))
+            cleaned.append(clean_with_llm(chunk, model_info, args.timeout))
         result = "\n\n".join(cleaned)
 
     out_path = out_dir / (pdf_path.stem + ".md")
@@ -183,6 +233,8 @@ def main():
     p.add_argument("pdfs", nargs="*", type=Path, help="Archivos PDF a convertir")
     p.add_argument("-o", "--out", type=Path, help="Carpeta de salida (por defecto, junto al PDF)")
     p.add_argument("-m", "--model", help="Modelo a usar, p.ej. 'ollama:llama3.1:8b' o 'qwen2.5:7b'")
+    p.add_argument("-v", "--vision-model",
+                   help="Modelo de visión para páginas escaneadas, p.ej. 'ollama:qwen2.5vl:7b'")
     p.add_argument("--url", help="URL de otro servidor compatible con OpenAI, p.ej. http://localhost:8080")
     p.add_argument("--list-models", action="store_true", help="Muestra los modelos locales detectados")
     p.add_argument("--no-ai", action="store_true", help="Sólo extracción, sin limpieza con IA")
@@ -201,10 +253,15 @@ def main():
     if not args.pdfs:
         p.error("indica al menos un PDF (o usa --list-models)")
 
-    model_info = None
-    if not args.no_ai:
-        model_info = pick_model(args.model, list_models(args.url))
-        print(f"Usando {model_info[0]}:{model_info[2]}")
+    model_info = vision_info = None
+    if not args.no_ai or args.vision_model:
+        available = list_models(args.url)
+        if not args.no_ai:
+            model_info = pick_model(args.model, available)
+            print(f"Usando {model_info[0]}:{model_info[2]}")
+        if args.vision_model:
+            vision_info = pick_model(args.vision_model, available)
+            print(f"Visión: {vision_info[0]}:{vision_info[2]}")
 
     for pdf in args.pdfs:
         if not pdf.is_file():
@@ -213,7 +270,7 @@ def main():
         out_dir = args.out or pdf.parent
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"Convirtiendo {pdf}...")
-        print(f"  -> {convert(pdf, out_dir, model_info, args)}")
+        print(f"  -> {convert(pdf, out_dir, model_info, vision_info, args)}")
 
 
 if __name__ == "__main__":
