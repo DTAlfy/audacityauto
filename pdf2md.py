@@ -19,6 +19,7 @@ Uso:
 """
 
 import argparse
+import glob
 import json
 import sys
 import urllib.error
@@ -211,6 +212,20 @@ def chunk_pages(pages, max_chars):
 
 # ----------------------------------------------------------------------- main
 
+def expand_inputs(items):
+    """Acepta archivos, carpetas y comodines (*.pdf), también en Windows."""
+    pdfs = []
+    for item in items:
+        path = Path(item)
+        if path.is_dir():
+            pdfs.extend(sorted(path.glob("*.pdf")))
+        elif glob.has_magic(item):
+            pdfs.extend(Path(m) for m in sorted(glob.glob(item)))
+        else:
+            pdfs.append(path)
+    return pdfs
+
+
 def convert(pdf_path, out_dir, model_info, vision_info, args):
     pages = ocr_scanned_pages(pdf_path, extract_pages(pdf_path), vision_info, args.timeout)
     if model_info is None:
@@ -230,7 +245,7 @@ def convert(pdf_path, out_dir, model_info, vision_info, args):
 
 def main():
     p = argparse.ArgumentParser(description="Convierte PDFs en Markdown limpio con IA local.")
-    p.add_argument("pdfs", nargs="*", type=Path, help="Archivos PDF a convertir")
+    p.add_argument("pdfs", nargs="*", help="PDFs, carpetas o comodines como *.pdf")
     p.add_argument("-o", "--out", type=Path, help="Carpeta de salida (por defecto, junto al PDF)")
     p.add_argument("-m", "--model", help="Modelo a usar, p.ej. 'ollama:llama3.1:8b' o 'qwen2.5:7b'")
     p.add_argument("-v", "--vision-model",
@@ -263,7 +278,7 @@ def main():
             vision_info = pick_model(args.vision_model, available)
             print(f"Visión: {vision_info[0]}:{vision_info[2]}")
 
-    for pdf in args.pdfs:
+    for pdf in expand_inputs(args.pdfs):
         if not pdf.is_file():
             print(f"[omitido] {pdf} no existe")
             continue

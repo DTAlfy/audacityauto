@@ -23,7 +23,8 @@ Necesitas al menos un servidor de modelos local:
 ```bash
 python pdf2md.py --list-models                      # ver qué modelos tienes
 python pdf2md.py informe.pdf                        # usa el primer modelo detectado
-python pdf2md.py *.pdf -m ollama:qwen2.5:7b -o md/  # varios PDFs, modelo concreto
+python pdf2md.py "*.pdf" -m ollama:qwen2.5:7b -o md/  # varios PDFs, modelo concreto
+python pdf2md.py mis_pdfs/ -o md/                  # todos los PDFs de una carpeta
 python pdf2md.py informe.pdf --no-ai                # sólo extracción, sin IA
 python pdf2md.py escaneado.pdf -v ollama:qwen2.5vl:7b  # leer páginas escaneadas
 ```
